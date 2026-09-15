@@ -34,8 +34,8 @@ struct FEMParameters {
     var h: Double = 0.3
     
     // 要素分割数
-    var nx: Int = 30
-    var ny: Int = 30
+    var nx: Int = 10
+    var ny: Int = 10
     
     // 境界条件
     var bcBottom: BoundaryCondition = .pinned
@@ -500,27 +500,77 @@ struct MeshPlotView: View {
     }
 }
 
-// モード図 (2.5D等角投影サーフェス)
+// モード図 (2.5D等角投影サーフェス: アスペクト比反映 & 枠内収束)
 struct ModeShapePlotView: View {
     let shape: [[Double]]
+    let lx: Double
+    let ly: Double
     
     var body: some View {
         Canvas { context, size in
             let ny = shape.count - 1
             let nx = shape[0].count - 1
-            guard ny > 0 && nx > 0 else { return }
+            guard ny > 0 && nx > 0, lx > 0, ly > 0 else { return }
             
-            let center = CGPoint(x: size.width * 0.5, y: size.height * 0.55)
-            let span = min(size.width, size.height) * 0.38
+            let padding: CGFloat = 24.0
+            let drawW = size.width - 2 * padding
+            let drawH = size.height - 2 * padding
             
-            func project(i: Int, j: Int, w: Double) -> CGPoint {
-                let u = (Double(i) / Double(nx) - 0.5) * 2.0
-                let v = (Double(j) / Double(ny) - 0.5) * 2.0
-                let xIso = (u - v) * cos(.pi / 6) * span
-                let yIso = (u + v) * sin(.pi / 6) * span - (w * span * 0.5)
-                return CGPoint(x: center.x + CGFloat(xIso), y: center.y + CGFloat(yIso))
+            // 投影角度 (30度等角投影)
+            let cosAngle = cos(Double.pi / 6.0)
+            let sinAngle = sin(Double.pi / 6.0)
+            
+            // 最大変位幅に対する見かけの高さスケール係数 (長辺基準の18%程度を変位高さとする)
+            let maxDimension = max(lx, ly)
+            let zScale = maxDimension * 0.18
+            
+            // 平板中心を (0, 0) とした実寸法空間座標から投影座標(未スケーリング)を算出
+            func rawProject(i: Int, j: Int, w: Double) -> (x: Double, y: Double) {
+                let xCoord = (Double(i) / Double(nx) - 0.5) * lx
+                let yCoord = (Double(j) / Double(ny) - 0.5) * ly
+                let zCoord = w * zScale
+                
+                let xProj = (xCoord - yCoord) * cosAngle
+                let yProj = (xCoord + yCoord) * sinAngle - zCoord
+                return (xProj, yProj)
             }
             
+            // 1. 全節点の投影座標からバウンディングボックスを計算 (枠内に収めるためのスケール算出)
+            var minX = Double.infinity
+            var maxX = -Double.infinity
+            var minY = Double.infinity
+            var maxY = -Double.infinity
+            
+            for j in 0...ny {
+                for i in 0...nx {
+                    let p = rawProject(i: i, j: j, w: shape[j][i])
+                    minX = min(minX, p.x); maxX = max(maxX, p.x)
+                    minY = min(minY, p.y); maxY = max(maxY, p.y)
+                }
+            }
+            
+            let spanX = maxX - minX
+            let spanY = maxY - minY
+            guard spanX > 1e-6, spanY > 1e-6 else { return }
+            
+            // 描画領域に完全に収まる拡大縮小倍率を決定
+            let scale = min(Double(drawW) / spanX, Double(drawH) / spanY)
+            
+            // 中心位置の補正
+            let midX = (minX + maxX) * 0.5
+            let midY = (minY + maxY) * 0.5
+            let screenCenterX = Double(size.width * 0.5)
+            let screenCenterY = Double(size.height * 0.5)
+            
+            // 画面上のスクリーン座標へ変換
+            func toScreen(i: Int, j: Int, w: Double) -> CGPoint {
+                let p = rawProject(i: i, j: j, w: w)
+                let sx = screenCenterX + (p.x - midX) * scale
+                let sy = screenCenterY + (p.y - midY) * scale
+                return CGPoint(x: sx, y: sy)
+            }
+            
+            // カラーマップ (青: -1.0 〜 緑: 0.0 〜 赤: +1.0)
             func getColor(val: Double) -> Color {
                 let t = CGFloat((val + 1.0) / 2.0)
                 return Color(
@@ -530,12 +580,13 @@ struct ModeShapePlotView: View {
                 )
             }
             
+            // メッシュサーフェスの描画
             for j in 0..<ny {
                 for i in 0..<nx {
-                    let p1 = project(i: i, j: j, w: shape[j][i])
-                    let p2 = project(i: i + 1, j: j, w: shape[j][i + 1])
-                    let p3 = project(i: i + 1, j: j + 1, w: shape[j + 1][i + 1])
-                    let p4 = project(i: i, j: j + 1, w: shape[j + 1][i])
+                    let p1 = toScreen(i: i,     j: j,     w: shape[j][i])
+                    let p2 = toScreen(i: i + 1, j: j,     w: shape[j][i + 1])
+                    let p3 = toScreen(i: i + 1, j: j + 1, w: shape[j + 1][i + 1])
+                    let p4 = toScreen(i: i,     j: j + 1, w: shape[j + 1][i])
                     
                     var poly = Path()
                     poly.move(to: p1)
@@ -546,7 +597,7 @@ struct ModeShapePlotView: View {
                     
                     let avgVal = (shape[j][i] + shape[j][i + 1] + shape[j + 1][i + 1] + shape[j + 1][i]) / 4.0
                     context.fill(poly, with: .color(getColor(val: avgVal).opacity(0.85)))
-                    context.stroke(poly, with: .color(.black.opacity(0.3)), lineWidth: 0.5)
+                    context.stroke(poly, with: .color(.black.opacity(0.25)), lineWidth: 0.5)
                 }
             }
         }
@@ -699,7 +750,7 @@ struct MeshAndMaterialView: View {
         }
         .navigationTitle("メッシュ・条件設定 (2/3)")
         .navigationDestination(isPresented: $navigateToResults) {
-            ModeResultsSwipeView(results: results)
+            ModeResultsSwipeView(results: results, lx: params.lx, ly: params.ly)
         }
     }
     
@@ -721,6 +772,8 @@ struct MeshAndMaterialView: View {
 // 画面３：モード図＆固有値出力画面（横スワイプ表示）
 struct ModeResultsSwipeView: View {
     let results: [ModeResult]
+    let lx: Double
+    let ly: Double
     @State private var selectedIndex = 0
     
     var body: some View {
@@ -732,8 +785,8 @@ struct ModeResultsSwipeView: View {
                             .font(.title)
                             .bold()
                         
-                        // 独立したモード図
-                        ModeShapePlotView(shape: mode.shape)
+                        // 平板の実アスペクト比を反映させたモード図
+                        ModeShapePlotView(shape: mode.shape, lx: lx, ly: ly)
                             .padding(.horizontal)
                         
                         // 固有振動数、固有周期、刺激係数
